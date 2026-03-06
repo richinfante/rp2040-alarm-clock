@@ -8,7 +8,8 @@ import microcontroller
 
 PWM_OFF = 0
 PWM_ON = 2**15
-ALARM_MAX_DURATION = 60 * 5 # 5 minute max alarm duration to prevent it from going indefinitely
+ALARM_MAX_DURATION = 60 * 10  # 10 minute max alarm duration to prevent it from going indefinitely
+SNOOZE_DURATION = 60 * 5  # 5 minute snooze duration
 
 # init hardware
 i2c = board.I2C()
@@ -54,6 +55,7 @@ alarm_started_at = None
 alarm_on = False
 alarm_time = (6, 30)  # hour, minute
 snoozed = False
+snoozed_at = None
 
 # editing state
 edit_start_dt = None
@@ -149,6 +151,7 @@ while True:
     t = rtc.datetime
 
   just_pressed = False
+  just_released = False
 
   if not button.value and not button_held:
     print("Button was just pressed")
@@ -158,6 +161,7 @@ while True:
   elif button.value and button_held:
     print("Button was just released")
     button_held = False
+    just_released = True
     last_ux_dt = time.monotonic()
 
   elif button_held:
@@ -165,6 +169,128 @@ while True:
     print("Button has been held for {:.1f} seconds".format(press_duration))
   else:
     press_duration = 0
+
+
+  #
+  # ALARM
+  #
+
+  # # when alarm is on and current time matches alarm time, start alarming
+  if not is_alarming and alarm_on and not edit_mode and (t.tm_hour, t.tm_min) == alarm_time and not snoozed:
+    print("Alarm time reached! Starting alarm.")
+    is_alarming = True
+    alarm_started_at = time.monotonic()
+    buzzer.frequency = TONE_FREQ[4]
+    buzzer.duty_cycle = PWM_ON
+    snoozed = False
+    snoozed_at = None
+
+  # if snoozed, and it's been more than SNOOZE_DURATION since snooze started, resound the alarm
+  elif snoozed and (time.monotonic() - snoozed_at) > SNOOZE_DURATION: # 5 minute snooze
+    print("Snooze duration ended, resounding alarm.")
+    is_alarming = True
+    alarm_started_at = time.monotonic()
+    buzzer.frequency = TONE_FREQ[4]
+    buzzer.duty_cycle = PWM_ON
+    snoozed = False
+    snoozed_at = None
+
+  # pulse the buzzer every 2 seconds to make a beeping sound when alarming
+  if is_alarming and alarm_started_at and int(time.monotonic() - alarm_started_at) % 2 == 0:
+    # change tone every 2 seconds
+    if button_held:
+      buzzer.duty_cycle = PWM_OFF
+    else:
+      buzzer.duty_cycle = PWM_ON
+
+  elif is_alarming:
+    buzzer.duty_cycle = PWM_OFF
+
+  # stop alarming after ALARM_MAX_DURATION to prevent it from going indefinitely
+  if is_alarming and alarm_started_at and (time.monotonic() - alarm_started_at) > ALARM_MAX_DURATION:
+    print("Alarm time ended. Stopping alarm.")
+    is_alarming = False
+    buzzer.duty_cycle = PWM_OFF
+
+  # single press to snooze (on release)
+  # snooze is for SNOOZE_DURATION, after which the alarm will sound again if not snoozed again or turned off
+  if is_alarming and just_released:
+    print("Alarm snoozed by button press.")
+    is_alarming = False
+    snoozed = True
+    snoozed_at = time.monotonic()
+    buzzer.duty_cycle = PWM_OFF
+    seg.print('sno2')
+    seg.colon = False
+    time.sleep(1)
+
+  # long press, stops the alarm entirely
+  if (snoozed or is_alarming) and button_held:
+    d1 = 0x0
+    d2 = 0x0
+    d3 = 0x0
+    d4 = 0x0
+
+    if press_duration > 0.25:
+      d1 = d1 | 0b00000001
+
+    if press_duration > 0.5:
+      d2 = d2 | 0b00000001
+
+    if press_duration > 0.75:
+      d3 = d3 | 0b00000001
+
+    if press_duration > 1.0:
+      d4 = d4 | 0b00000001
+
+    if press_duration > 1.25:
+      d4 = d4 | 0b00000010
+
+    if press_duration > 1.5:
+      d4 = d4 | 0b00000100
+
+    if press_duration > 1.75:
+      d4 = d4 | 0b00001000
+
+    if press_duration > 2.0:
+      d3 = d3 | 0b00001000
+
+    if press_duration > 2.25:
+      d2 = d2 | 0b00001000
+
+    if press_duration > 2.5:
+      d1 = d1 | 0b00001000
+
+    if press_duration > 3.0:
+      d1 = d1 | 0b00010000
+
+    if press_duration > 3.5:
+      d1 = d1 | 0b00100000
+
+    seg.set_digit_raw(0, d1)
+    seg.set_digit_raw(1, d2)
+    seg.set_digit_raw(2, d3)
+    seg.set_digit_raw(3, d4)
+    seg.colon = True
+
+    # 4 sec long press -> alarm silenced until next time
+    if press_duration > 4:
+      # shut off alarm entirely
+      is_alarming = False
+      snoozed = False
+      snoozed_at = None
+      press_duration = 0
+      last_ux_dt = time.monotonic()
+      print("Alarm silenced for good by long button press.")
+      seg.print('0FF ')
+      seg.colon = False
+      buzzer.frequency = TONE_FREQ[0]
+      buzzer.duty_cycle = PWM_ON
+      time.sleep(0.25)
+      buzzer.duty_cycle = PWM_OFF
+      time.sleep(0.75)
+
+    continue # skip screen rendering
 
   position = encoder.position
   if last_position is None or position != last_position and not edit_mode:
@@ -234,44 +360,6 @@ while True:
     last_screen_transition = time.monotonic()
     last_ux_dt = time.monotonic()
 
-
-  #
-  # ALARM
-  #
-
-  # # when alarm is on and current time matches alarm time, start alarming
-  if not is_alarming and alarm_on and not edit_mode and (t.tm_hour, t.tm_min) == alarm_time and not snoozed:
-    print("Alarm time reached! Starting alarm.")
-    is_alarming = True
-    alarm_started_at = time.monotonic()
-    buzzer.frequency = TONE_FREQ[0]
-
-    buzzer.duty_cycle = PWM_ON
-
-  # alarm reset once the snooze timer no longer matches the alarm time
-  if snoozed and not is_alarming and alarm_on and (t.tm_hour, t.tm_min) != alarm_time:
-    print("Resetting snooze since alarm time no longer matches")
-    snoozed = False
-
-  # pulse the buzzer every 2 seconds to make a beeping sound when alarmin
-  if is_alarming and alarm_started_at and int(time.monotonic() - alarm_started_at) % 2 == 0:
-    # change tone every 2 seconds
-    buzzer.duty_cycle = PWM_ON
-  elif is_alarming:
-    buzzer.duty_cycle = PWM_OFF
-
-  # stop alarming after 1 minute to prevent it from going indefinitely
-  if is_alarming and alarm_started_at and (time.monotonic() - alarm_started_at) > ALARM_MAX_DURATION:
-    print("Alarm time ended. Stopping alarm.")
-    is_alarming = False
-    buzzer.duty_cycle = PWM_OFF
-
-  # allow user to silence alarm with button press
-  if is_alarming and just_pressed:
-    print("Alarm silenced by button press.")
-    is_alarming = False
-    snoozed = True
-    buzzer.duty_cycle = PWM_OFF
 
 
   #
